@@ -45,6 +45,36 @@ app.use((req, res, next) => {
   next();
 });
 
+// ---- Hilfsfunktion: Transkriptions-Ergebnis in Text umwandeln ----
+// Unterstuetzt sowohl das Standard-Format (.text) als auch das diarisierte
+// Format (Segmente mit Sprecher-Labels). Faellt bei Bedarf auf reinen Text zurueck.
+function formatTranscriptResult(result) {
+  if (!result) return "";
+
+  // Diarisiertes Format: Array von Segmenten mit "speaker" und "text"
+  const segs = result.segments || result.diarized_segments;
+  if (Array.isArray(segs) && segs.length > 0 && segs[0] && segs[0].text !== undefined) {
+    const lines = [];
+    let lastSpeaker = null;
+    for (const s of segs) {
+      const speaker = s.speaker !== undefined && s.speaker !== null ? String(s.speaker) : null;
+      const segText = (s.text || "").trim();
+      if (!segText) continue;
+      if (speaker && speaker !== lastSpeaker) {
+        lines.push(`\nSprecher ${speaker}: ${segText}`);
+        lastSpeaker = speaker;
+      } else {
+        lines.push(segText);
+      }
+    }
+    const joined = lines.join(" ").replace(/\n /g, "\n").trim();
+    if (joined) return joined;
+  }
+
+  // Standard-Format
+  return (result.text ? result.text : "").trim();
+}
+
 // ---- Hilfsfunktion: FFmpeg ausfuehren ----
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
@@ -109,17 +139,25 @@ app.post("/transcribe", upload.single("file"), async (req, res) => {
     }
 
     // Schritt 2: Jedes Segment einzeln transkribieren
+    const isDiarize = TRANSCRIBE_MODEL.includes("diarize");
     const parts = [];
     for (const f of files) {
       const segPath = path.join(workDir, f);
-      const result = await openai.audio.transcriptions.create({
+
+      // Diarize-Modelle verlangen chunking_strategy + response_format "diarized_json".
+      // Normale Transkriptionsmodelle nutzen das Standard-Format mit .text.
+      const params = {
         file: fs.createReadStream(segPath),
         model: TRANSCRIBE_MODEL,
         language: "de",
-        // response_format bewusst weggelassen -> Standard (json mit .text).
-        // Fuer Sprecher-Trennung siehe Hinweis in der README.
-      });
-      const text = (result && result.text ? result.text : "").trim();
+      };
+      if (isDiarize) {
+        params.chunking_strategy = "auto";
+        params.response_format = "diarized_json";
+      }
+
+      const result = await openai.audio.transcriptions.create(params);
+      const text = formatTranscriptResult(result);
       if (text) parts.push(text);
     }
 
