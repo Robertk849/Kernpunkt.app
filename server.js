@@ -45,6 +45,34 @@ app.use((req, res, next) => {
   next();
 });
 
+// ---- Direkter OpenAI-Transkriptionsaufruf (SDK-unabhaengig) ----
+// Sendet das Audiosegment per multipart/form-data direkt an die API.
+// Dadurch sind chunking_strategy und response_format garantiert dabei,
+// egal welche openai-SDK-Version installiert ist.
+async function transcribeSegment(segPath, isDiarize) {
+  const fileBuffer = await fsp.readFile(segPath);
+  const form = new FormData();
+  form.append("file", new Blob([fileBuffer], { type: "audio/mpeg" }), path.basename(segPath));
+  form.append("model", TRANSCRIBE_MODEL);
+  form.append("language", "de");
+  if (isDiarize) {
+    form.append("chunking_strategy", "auto");
+    form.append("response_format", "diarized_json");
+  }
+
+  const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + OPENAI_API_KEY },
+    body: form,
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(resp.status + " " + errText);
+  }
+  return resp.json();
+}
+
 // ---- Hilfsfunktion: Transkriptions-Ergebnis in Text umwandeln ----
 // Unterstuetzt sowohl das Standard-Format (.text) als auch das diarisierte
 // Format (Segmente mit Sprecher-Labels). Faellt bei Bedarf auf reinen Text zurueck.
@@ -138,25 +166,15 @@ app.post("/transcribe", upload.single("file"), async (req, res) => {
       throw new Error("Keine Audiosegmente erzeugt - Datei evtl. beschaedigt oder leer.");
     }
 
-    // Schritt 2: Jedes Segment einzeln transkribieren
+    // Schritt 2: Jedes Segment einzeln transkribieren.
+    // Wir rufen die OpenAI-Schnittstelle DIREKT per multipart/form-data auf,
+    // unabhaengig von der installierten SDK-Version. So kommen chunking_strategy
+    // und response_format garantiert mit an.
     const isDiarize = TRANSCRIBE_MODEL.includes("diarize");
     const parts = [];
     for (const f of files) {
       const segPath = path.join(workDir, f);
-
-      // Diarize-Modelle verlangen chunking_strategy + response_format "diarized_json".
-      // Normale Transkriptionsmodelle nutzen das Standard-Format mit .text.
-      const params = {
-        file: fs.createReadStream(segPath),
-        model: TRANSCRIBE_MODEL,
-        language: "de",
-      };
-      if (isDiarize) {
-        params.chunking_strategy = "auto";
-        params.response_format = "diarized_json";
-      }
-
-      const result = await openai.audio.transcriptions.create(params);
+      const result = await transcribeSegment(segPath, isDiarize);
       const text = formatTranscriptResult(result);
       if (text) parts.push(text);
     }
